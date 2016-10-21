@@ -62,37 +62,42 @@ class ContinuousFuturesTestCase(WithCreateBarData,
     @classmethod
     def make_futures_info(self):
         return DataFrame({
-            'symbol': ['FOF16', 'FOG16', 'FOH16', 'FOJ16', 'FOF22'],
-            'root_symbol': ['FO', 'FO', 'FO', 'FO', 'FO'],
-            'asset_name': ['Foo'] * 5,
+            'symbol': ['FOF16', 'FOG16', 'FOH16', 'FOJ16', 'FOK16', 'FOF22'],
+            'root_symbol': ['FO'] * 6,
+            'asset_name': ['Foo'] * 6,
             'start_date': [Timestamp('2015-01-05', tz='UTC'),
                            Timestamp('2015-02-05', tz='UTC'),
                            Timestamp('2015-03-05', tz='UTC'),
                            Timestamp('2015-04-05', tz='UTC'),
+                           Timestamp('2015-05-05', tz='UTC'),
                            Timestamp('2021-01-05', tz='UTC')],
             'end_date': [Timestamp('2016-08-19', tz='UTC'),
                          Timestamp('2016-09-19', tz='UTC'),
                          Timestamp('2016-10-19', tz='UTC'),
                          Timestamp('2016-11-19', tz='UTC'),
+                         Timestamp('2016-12-19', tz='UTC'),
                          Timestamp('2022-08-19', tz='UTC')],
             'notice_date': [Timestamp('2016-01-26', tz='UTC'),
                             Timestamp('2016-02-26', tz='UTC'),
                             Timestamp('2016-03-24', tz='UTC'),
                             Timestamp('2016-04-26', tz='UTC'),
+                            Timestamp('2016-05-26', tz='UTC'),
                             Timestamp('2022-01-26', tz='UTC')],
             'expiration_date': [Timestamp('2016-01-26', tz='UTC'),
                                 Timestamp('2016-02-26', tz='UTC'),
                                 Timestamp('2016-03-24', tz='UTC'),
                                 Timestamp('2016-04-26', tz='UTC'),
+                                Timestamp('2016-05-26', tz='UTC'),
                                 Timestamp('2022-01-26', tz='UTC')],
             'auto_close_date': [Timestamp('2016-01-26', tz='UTC'),
                                 Timestamp('2016-02-26', tz='UTC'),
                                 Timestamp('2016-03-24', tz='UTC'),
                                 Timestamp('2016-04-26', tz='UTC'),
+                                Timestamp('2016-05-26', tz='UTC'),
                                 Timestamp('2022-01-26', tz='UTC')],
-            'tick_size': [0.001] * 5,
-            'multiplier': [1000.0] * 5,
-            'exchange': ['CME'] * 5,
+            'tick_size': [0.001] * 6,
+            'multiplier': [1000.0] * 6,
+            'exchange': ['CME'] * 6,
         })
 
     @classmethod
@@ -126,7 +131,6 @@ class ContinuousFuturesTestCase(WithCreateBarData,
             arange(r, r * FUTURES_MINUTES_PER_DAY + r, r, dtype=int64),
             len(sessions))
         vol_markers = vol_day_markers + vol_min_markers
-
         base_df = pd.DataFrame(
             {
                 'open': full(len(dts), 102000.0) + markers,
@@ -138,8 +142,28 @@ class ContinuousFuturesTestCase(WithCreateBarData,
             index=dts)
         # Add the sid to the ones place of the prices, so that the ones
         # place can be used to eyeball the source contract.
-        for i in range(5):
-            yield i, base_df + i * 10000
+
+        # For volume roll tests end sid volume early.
+        # FOF16 cuts out day before autoclose of 01-26
+        # FOG16 cuts out on autoclose
+        # FOH16 cuts out 4 days before autoclose
+        # FOJ16 cuts out 3 days before autoclose
+
+        sid_to_vol_stop_session = {
+            0: Timestamp('2016-01-25', tz='UTC'),
+            1: Timestamp('2016-02-26', tz='UTC'),
+            2: Timestamp('2016-03-18', tz='UTC'),
+            3: Timestamp('2016-04-20', tz='UTC'),
+        }
+        for i in range(6):
+            df = base_df.copy()
+            df += i * 10000
+            if i in sid_to_vol_stop_session:
+                vol_stop_session = sid_to_vol_stop_session[i]
+                m_open = tc.open_and_close_for_session(vol_stop_session)[0]
+                loc = dts.searchsorted(m_open)
+                df.volume.values[loc:] = 0
+            yield i, df
 
     def test_create_continuous_future(self):
         cf_primary = self.asset_finder.create_continuous_future(
@@ -362,7 +386,7 @@ def record_current_contract(algo, data):
 
         self.assertEqual(window.loc['2016-02-25', cf],
                          1,
-                         "Should be FOF16 on session before roll.")
+                         "Should be FOG16 on session before roll.")
 
         self.assertEqual(window.loc['2016-02-26', cf],
                          2,
@@ -397,6 +421,70 @@ def record_current_contract(algo, data):
         self.assertEqual(window.loc['2016-03-28', cf],
                          3,
                          "Should be FOJ16 on session after roll.")
+
+    def test_history_sid_session_volume_roll(self):
+        cf = self.data_portal.asset_finder.create_continuous_future(
+            'FO', 0, 'volume')
+        window = self.data_portal.get_history_window(
+            [cf],
+            Timestamp('2016-03-03 18:01', tz='US/Eastern').tz_convert('UTC'),
+            30, '1d', 'sid')
+
+        # Volume cuts out for FOF16 on 2016-01-25
+        self.assertEqual(window.loc['2016-01-25', cf],
+                         1,
+                         "Should be FOG16 at beginning of window.")
+
+        self.assertEqual(window.loc['2016-01-26', cf],
+                         1,
+                         "Should have remained FOG16.")
+
+        self.assertEqual(window.loc['2016-02-25', cf],
+                         1,
+                         "Should be FOG16 on session before roll.")
+
+        self.assertEqual(window.loc['2016-02-26', cf],
+                         2,
+                         "Should be FOH16 on session with roll.")
+
+        self.assertEqual(window.loc['2016-02-29', cf],
+                         2,
+                         "Should be FOH16 on session after roll.")
+
+        # Advance the window a month.
+        window = self.data_portal.get_history_window(
+            [cf],
+            Timestamp('2016-04-06 18:01', tz='US/Eastern').tz_convert('UTC'),
+            30, '1d', 'sid')
+
+        self.assertEqual(window.loc['2016-02-25', cf],
+                         1,
+                         "Should be FOG16 at beginning of window.")
+
+        self.assertEqual(window.loc['2016-02-26', cf],
+                         2,
+                         "Should be FOH16 on session with roll.")
+
+        self.assertEqual(window.loc['2016-02-29', cf],
+                         2,
+                         "Should be FOH16 on session after roll.")
+
+        self.assertEqual(window.loc['2016-03-17', cf],
+                         2,
+                         "Should be FOH16 on session before volume cuts out.")
+
+        self.assertEqual(window.loc['2016-03-18', cf],
+                         3,
+                         "Should be FOJ16 on session where the volume of "
+                         "FOH16 cuts out.")
+
+        self.assertEqual(window.loc['2016-03-24', cf],
+                         3,
+                         "Should have remained FOJ16.")
+
+        self.assertEqual(window.loc['2016-03-28', cf],
+                         3,
+                         "Should have remained FOJ16.")
 
     def test_history_sid_minute(self):
         cf = self.data_portal.asset_finder.create_continuous_future(

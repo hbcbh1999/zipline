@@ -86,8 +86,6 @@ class CalendarRollFinder(RollFinder):
         oc = self.asset_finder.get_ordered_contracts(root_symbol)
         session = self.trading_calendar.minute_to_session_label(dt)
         primary_candidate = oc.contract_before_auto_close(session.value)
-
-        # Here is where a volume check would be.
         primary = primary_candidate
         return oc.contract_at_offset(primary, offset)
 
@@ -109,4 +107,63 @@ class CalendarRollFinder(RollFinder):
             auto_close_date = Timestamp(oc.auto_close_dates[i - offset],
                                         tz='UTC')
 
+        return rolls
+
+
+class VolumeRollFinder(RollFinder):
+    """
+    The CalendarRollFinder calculates contract rolls based on when
+    volume activity transfers from one contract to another.
+    """
+
+    def __init__(self, trading_calendar, asset_finder, session_reader):
+        self.trading_calendar = trading_calendar
+        self.asset_finder = asset_finder
+        self.session_reader = session_reader
+
+    def get_contract_center(self, root_symbol, dt, offset):
+        oc = self.asset_finder.get_ordered_contracts(root_symbol)
+        session = self.trading_calendar.minute_to_session_label(dt)
+        front = oc.contract_before_auto_close(session.value)
+        back = oc.contract_at_offset(front, 1)
+        # Volume check.
+        session = self.trading_calendar.minute_to_session_label(dt)
+        front_vol = self.session_reader.get_value(front, session, 'volume')
+        back_vol = self.session_reader.get_value(back, session, 'volume')
+        primary = back if back_vol > front_vol else front
+        return oc.contract_at_offset(primary, offset)
+
+    def get_rolls(self, root_symbol, start, end, offset):
+        oc = self.asset_finder.get_ordered_contracts(root_symbol)
+        back = oc.contract_before_auto_close(end.value)
+        front = oc.contract_at_offset(back, -1)
+        for i, sid in enumerate(oc.contract_sids):
+            if sid == front:
+                break
+        auto_close_date = Timestamp(oc.auto_close_dates[i], tz='UTC')
+        front_vol = self.session_reader.get_value(
+            front, auto_close_date, 'volume')
+        back_vol = self.session_reader.get_value(
+            back, auto_close_date, 'volume')
+        first = front if front_vol > back_vol else back
+        rolls = [(first, None)]
+        sessions = self.trading_calendar.sessions_in_range(start, end)
+        while auto_close_date > start and i > -1:
+            session_loc = sessions.searchsorted(auto_close_date)
+            front = oc.contract_sids[i]
+            back = oc.contract_sids[i + 1]
+            while session_loc > -1:
+                session = sessions[session_loc]
+                front_vol = self.session_reader.get_value(
+                    front, session, 'volume')
+                back_vol = self.session_reader.get_value(
+                    back, session, 'volume')
+                if not (front_vol == 0 and back_vol > 0):  # FIXME!
+                    break
+                session_loc -= 1
+            if session > start:
+                rolls.insert(0, (front, sessions[session_loc + 1]))
+            i -= 1
+            auto_close_date = Timestamp(oc.auto_close_dates[i],
+                                        tz='UTC')
         return rolls
